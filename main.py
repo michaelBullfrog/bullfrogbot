@@ -232,12 +232,25 @@ if not company and "|" in text:
     if len(parts) >= 3 and "@" not in parts[2]:
         company = parts[2]
 
+if not company and email and "@" in email:
+    dom = email.split("@")[1].lower()
+    # ignore free-mail domains so we don't set "gmail.com" etc.
+    if dom in {"gmail.com","outlook.com","hotmail.com","yahoo.com","icloud.com","aol.com",
+               "proton.me","protonmail.com","pm.me","yandex.com","zoho.com","live.com","msn.com"}:
+        company = ""
+    else:
+        labels = dom.split(".")
+        if len(labels) >= 3 and labels[-2] in {"co","com","org","net"} and len(labels[-1]) == 2:
+            base = labels[-3]
+        elif len(labels) >= 2:
+            base = labels[-2]
+        else:
+            base = labels[0]
+        base = re.sub(r"\d+", "", base.replace("-", " ").replace("_", " ")).strip()
+        company = base.title() if base else ""
+
 if not company:
-    company = extract_company_from_text(text)
-if (not company) and email:
-    company = domain_to_company(email)
-if company and "@" in company:
-    company = ""
+    company = "Unknown"
 
 
     return {
@@ -294,7 +307,7 @@ async def zoho_create_lead(lead: dict):
         "First_Name": lead.get("firstName", ""),
         "Last_Name": lead.get("lastName", "Unknown") or "Unknown",
         "Company": lead.get("company", "Unknown") or "Unknown",
-        "Description": "Captured from Webex.\n\nRaw: " + (lead.get('raw', '') or ''),
+        "Description": "Captured from Webex." = "\n\n" = "Raw: " + (lead.get('raw', '') or ''),
         "Lead_Source": "Webex Bot",
     }
 
@@ -494,4 +507,5 @@ curl -X POST "https://webexapis.com/v1/webhooks" \
 
 # ------------------ Run ------------------
 # uvicorn main:app --host 0.0.0.0 --port ${PORT:-3000}
+
 
