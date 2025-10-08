@@ -110,13 +110,17 @@ KV_RE = re.compile(r"(name|email|company|phone|first_name|last_name)\s*[:=]\s*([
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 EMAIL_EXTRACT = re.compile(r"([A-Z0-9._%+\-]+)@([A-Z0-9.\-]+\.[A-Z]{2,})", re.I)
 
+
 def clean_email(val: Optional[str]) -> str:
     if not val:
         return ""
     e = val.strip().strip("<>").strip(";, ")
     m = EMAIL_EXTRACT.search(e)
     return (f"{m.group(1)}@{m.group(2)}".lower() if m else "")
+
+
 PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}")
+
 
 def parse_lead(text: str):
     data = {}
@@ -141,18 +145,20 @@ def parse_lead(text: str):
     first_name = data.get("first_name")
     last_name = data.get("last_name")
 
-    if not name:
-        if "|" in text:
-            parts = [p.strip() for p in text.split("|")]
-            if parts:
-                name = parts[0]
+    # If name not provided, try pipe format: Name | email | company | phone
+    if not name and "|" in text:
+        parts = [p.strip() for p in text.split("|")]
+        if parts:
+            name = parts[0]
 
+    # Company is its own entity: ONLY accept when explicitly provided or via pipe slot #3
     company = data.get("company")
     if not company and "|" in text:
         parts = [p.strip() for p in text.split("|")]
         if len(parts) >= 3:
             company = parts[2]
 
+    # Split name if needed
     if (not first_name or not last_name) and name:
         pieces = name.split()
         if len(pieces) == 1:
@@ -165,8 +171,8 @@ def parse_lead(text: str):
     if not last_name:
         last_name = "Unknown"
 
-    if not company:
-        company = email.split("@")[1] if email and "@" in email else "Unknown"
+    # Do NOT infer company from email domain; leave blank if not provided
+    company = company or ""
 
     return {
         "firstName": first_name or "",
@@ -193,6 +199,7 @@ async def zoho_access_token():
         r.raise_for_status()
         return r.json()["access_token"]
 
+
 def clean_phone(val: Optional[str]) -> str:
     if not val:
         return ""
@@ -213,6 +220,7 @@ def clean_phone(val: Optional[str]) -> str:
         return '+' + digits
     return digits
 
+
 async def zoho_create_lead(lead: dict):
     token = await zoho_access_token()
     url = f"https://www.zohoapis.{ZOHO_DC}/crm/v2/Leads"
@@ -221,15 +229,18 @@ async def zoho_create_lead(lead: dict):
     lead_record = {
         "First_Name": lead.get("firstName", ""),
         "Last_Name": lead.get("lastName", "Unknown") or "Unknown",
+        # If company missing, set a safe default for Zoho
         "Company": lead.get("company", "Unknown") or "Unknown",
         "Description": "Captured from Webex.\n\nRaw: " + (lead.get('raw', '') or ''),
         "Lead_Source": "Webex Bot",
     }
 
+    # Add Email only if valid
     email_val = clean_email(lead.get("email"))
     if email_val:
         lead_record["Email"] = email_val
 
+    # Add Phone only if valid
     phone_val = clean_phone(lead.get("phone"))
     if phone_val:
         lead_record["Phone"] = phone_val
@@ -253,6 +264,7 @@ async def zoho_create_lead(lead: dict):
         raise RuntimeError(f"Zoho error: {json.dumps(body)})")
 
 # ------------------ Google APIs ------------------
+
 def google_creds(scopes):
     if not (GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY):
         raise RuntimeError("Google SA env vars missing")
@@ -265,6 +277,7 @@ def google_creds(scopes):
         },
         scopes=scopes,
     )
+
 
 async def sheets_append_row(values):
     if not GOOGLE_SHEET_ID:
@@ -279,6 +292,7 @@ async def sheets_append_row(values):
     )
     res = req.execute()
     return (res.get("updates") or {}).get("updatedRange")
+
 
 async def gdoc_append_text(text: str):
     if not GOOGLE_DOC_ID:
@@ -295,6 +309,7 @@ async def gdoc_append_text(text: str):
     return "Appended to Doc"
 
 # ------------------ Webhook signature ------------------
+
 def verify_signature(raw_body: bytes, signature: Optional[str]) -> bool:
     if not WEBEX_WEBHOOK_SECRET:
         return True
@@ -304,10 +319,12 @@ def verify_signature(raw_body: bytes, signature: Optional[str]) -> bool:
     return hmac.compare_digest(mac, signature)
 
 # ------------------ Models ------------------
+
 class WebexEventData(BaseModel):
     id: str
     roomId: str
     personId: Optional[str] = None
+
 
 class WebexEvent(BaseModel):
     id: Optional[str] = None
@@ -317,9 +334,11 @@ class WebexEvent(BaseModel):
     data: WebexEventData
 
 # ------------------ Routes ------------------
+
 @app.get("/healthz")
 async def healthz():
     return PlainTextResponse("ok")
+
 
 @app.post("/webex/webhook")
 async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Header(None)):
@@ -334,6 +353,7 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
     if WEBEX_ROOM_ID and payload.data.roomId != WEBEX_ROOM_ID:
         return PlainTextResponse("wrong room")
 
+    # Deduplicate if the same Webex event/message arrives more than once (multiple webhooks or retries)
     if seen_before(payload.data.id):
         return PlainTextResponse("duplicate")
 
@@ -351,18 +371,20 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
     try:
         zoho_id = await zoho_create_lead(lead)
     except Exception as e:
+        # Notify room and return handled
         try:
             await webex_post_message(payload.data.roomId, f"❌ Zoho error: {e}")
         finally:
             return PlainTextResponse("handled")
 
+    # Google logging (best-effort)
     ts = datetime.utcnow().isoformat()
     try:
         updated = await sheets_append_row([
             ts,
             f"{lead['firstName']} {lead['lastName']}".strip(),
             lead["email"],
-            lead["company"],
+            (lead["company"] or "Unknown"),
             lead["phone"],
             payload.data.roomId,
             payload.data.id,
@@ -377,7 +399,7 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
                 f"Lead @ {ts}\n"
                 f"Name: {lead['firstName']} {lead['lastName']}\n"
                 f"Email: {lead['email']}\n"
-                f"Company: {lead['company']}\n"
+                f"Company: {(lead['company'] or 'Unknown')}\n"
                 f"Phone: {lead['phone']}\n"
                 f"Zoho ID: {zoho_id}\n"
                 f"Room: {payload.data.roomId}\n"
@@ -396,6 +418,7 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
     await webex_post_message(payload.data.roomId, conf)
     return PlainTextResponse("ok")
 
+# --------------- Dev helper to create webhook (run once via curl) ---------------
 """
 Example cURL to create the webhook (replace values):
 
