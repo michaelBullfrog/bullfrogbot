@@ -108,6 +108,14 @@ async def webex_post_message(room_id: str, markdown: str):
 # ------------------ Parsing ------------------
 KV_RE = re.compile(r"(name|email|company|phone|first_name|last_name)\s*[:=]\s*([^;\n]+)", re.IGNORECASE)
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+EMAIL_EXTRACT = re.compile(r"([A-Z0-9._%+\-]+)@([A-Z0-9.\-]+\.[A-Z]{2,})", re.I)
+
+def clean_email(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    e = val.strip().strip("<>").strip(";, ")
+    m = EMAIL_EXTRACT.search(e)
+    return (f"{m.group(1)}@{m.group(2)}".lower() if m else "")
 PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}")
 
 
@@ -118,11 +126,11 @@ def parse_lead(text: str):
         val = m.group(2).strip()
         data[key] = val
 
-    email = data.get("email")
+    email = clean_email(data.get("email"))
     if not email:
-        m = EMAIL_RE.search(text)
+        m = EMAIL_EXTRACT.search(text)
         if m:
-            email = m.group(0)
+            email = f"{m.group(1)}@{m.group(2)}".lower()
 
     phone = data.get("phone")
     if not phone:
@@ -196,7 +204,7 @@ async def zoho_create_lead(lead: dict):
             {
                 "First_Name": lead["firstName"],
                 "Last_Name": lead["lastName"],
-                "Email": lead["email"],
+                "Email": (lead.get("email") or None),
                 "Company": lead["company"],
                 "Phone": lead["phone"],
                 "Description": f"Captured from Webex.\n\nRaw: {lead['raw']}",
