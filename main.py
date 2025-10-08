@@ -118,7 +118,6 @@ def clean_email(val: Optional[str]) -> str:
     return (f"{m.group(1)}@{m.group(2)}".lower() if m else "")
 PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}")
 
-
 def parse_lead(text: str):
     data = {}
     for m in KV_RE.finditer(text):
@@ -143,7 +142,6 @@ def parse_lead(text: str):
     last_name = data.get("last_name")
 
     if not name:
-        # Try pipe format: Name | email | company | phone
         if "|" in text:
             parts = [p.strip() for p in text.split("|")]
             if parts:
@@ -155,7 +153,6 @@ def parse_lead(text: str):
         if len(parts) >= 3:
             company = parts[2]
 
-    # Split name if needed
     if (not first_name or not last_name) and name:
         pieces = name.split()
         if len(pieces) == 1:
@@ -225,18 +222,14 @@ async def zoho_create_lead(lead: dict):
         "First_Name": lead.get("firstName", ""),
         "Last_Name": lead.get("lastName", "Unknown") or "Unknown",
         "Company": lead.get("company", "Unknown") or "Unknown",
-        "Description": "Captured from Webex.
-
-Raw: " + (lead.get('raw', '') or ''),
+        "Description": "Captured from Webex.\n\nRaw: " + (lead.get('raw', '') or ''),
         "Lead_Source": "Webex Bot",
     }
 
-    # Add Email only if valid
     email_val = clean_email(lead.get("email"))
     if email_val:
         lead_record["Email"] = email_val
 
-    # Add Phone only if valid
     phone_val = clean_phone(lead.get("phone"))
     if phone_val:
         lead_record["Phone"] = phone_val
@@ -260,7 +253,6 @@ Raw: " + (lead.get('raw', '') or ''),
         raise RuntimeError(f"Zoho error: {json.dumps(body)})")
 
 # ------------------ Google APIs ------------------
-
 def google_creds(scopes):
     if not (GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY):
         raise RuntimeError("Google SA env vars missing")
@@ -303,7 +295,6 @@ async def gdoc_append_text(text: str):
     return "Appended to Doc"
 
 # ------------------ Webhook signature ------------------
-
 def verify_signature(raw_body: bytes, signature: Optional[str]) -> bool:
     if not WEBEX_WEBHOOK_SECRET:
         return True
@@ -343,7 +334,6 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
     if WEBEX_ROOM_ID and payload.data.roomId != WEBEX_ROOM_ID:
         return PlainTextResponse("wrong room")
 
-    # Deduplicate if the same Webex event/message arrives more than once (multiple webhooks or retries)
     if seen_before(payload.data.id):
         return PlainTextResponse("duplicate")
 
@@ -361,13 +351,11 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
     try:
         zoho_id = await zoho_create_lead(lead)
     except Exception as e:
-        # Notify room and return handled
         try:
             await webex_post_message(payload.data.roomId, f"❌ Zoho error: {e}")
         finally:
             return PlainTextResponse("handled")
 
-    # Google logging (best-effort)
     ts = datetime.utcnow().isoformat()
     try:
         updated = await sheets_append_row([
@@ -408,7 +396,6 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
     await webex_post_message(payload.data.roomId, conf)
     return PlainTextResponse("ok")
 
-# --------------- Dev helper to create webhook (run once via curl) ---------------
 """
 Example cURL to create the webhook (replace values):
 
