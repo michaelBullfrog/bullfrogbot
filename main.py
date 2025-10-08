@@ -106,7 +106,7 @@ async def webex_post_message(room_id: str, markdown: str):
         return r.json()
 
 # ------------------ Parsing ------------------
-KV_RE = re.compile(r"(name|email|company|phone|first_name|last_name)\s*[:=]\s*([^;\n]+)", re.IGNORECASE)
+KV_RE = re.compile(r"(name|email|company|company name|business|org|organization|first_name|last_name|phone)\s*[:=]\s*([^;\n|]+)", re.IGNORECASE)
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 EMAIL_EXTRACT = re.compile(r"([A-Z0-9._%+\-]+)@([A-Z0-9.\-]+\.[A-Z]{2,})", re.I)
 
@@ -117,6 +117,77 @@ def clean_email(val: Optional[str]) -> str:
     m = EMAIL_EXTRACT.search(e)
     return (f"{m.group(1)}@{m.group(2)}".lower() if m else "")
 PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}")
+# --- Company extraction helpers ---
+COMPANY_SUFFIXES = [
+    "inc", "inc.", "llc", "l.l.c.", "ltd", "ltd.", "corp", "corp.", "corporation",
+    "company", "co", "co.", "gmbh", "ag", "bv", "nv", "plc", "pty ltd", "pty. ltd",
+    "sas", "sasu", "sarl", "oy", "ab", "as", "kk", "k.k.", "limited", "s.p.a.", "spa", "s.a.",
+]
+COMPANY_SUFFIX_RE = re.compile(
+    r"\b([A-Z][\w&\-\., ]{1,80}?\s(?:" + "|".join([re.escape(s) for s in COMPANY_SUFFIXES]) + r"))\b",
+    re.I,
+)
+COMPANY_AT_RE = re.compile(r"\b(?:at|from|with|for|of)\s+([A-Z][\w&\-\., ]{2,80})\b", re.I)
+
+FREE_EMAIL_DOMAINS = {
+    "gmail.com","outlook.com","hotmail.com","yahoo.com","icloud.com","aol.com",
+    "proton.me","protonmail.com","pm.me","yandex.com","zoho.com","live.com","msn.com",
+}
+
+def smart_title(s: str) -> str:
+    parts = re.split(r"([\s\-&\.])", s.strip())
+    out = []
+    for p in parts:
+        if not p or re.fullmatch(r"[\s\-&\.]+", p):
+            out.append(p); continue
+        out.append(p if p.isupper() else p.capitalize())
+    return ''.join(out).strip(' ,.')
+
+def domain_to_company(email: Optional[str]) -> str:
+    m = EMAIL_EXTRACT.search(email or "")
+    if not m:
+        return ""
+    domain = m.group(2).lower()
+    if domain in FREE_EMAIL_DOMAINS:
+        return ""
+    labels = domain.split(".")
+    while labels and labels[0] in {"mail","email","support","info","hello","app","apps","dev","corp","www"}:
+        labels.pop(0)
+    if len(labels) >= 3 and labels[-2] in {"co","com","org","net"} and len(labels[-1]) == 2:
+        base = labels[-3]
+    elif len(labels) >= 2:
+        base = labels[-2]
+    else:
+        base = labels[0]
+    base = re.sub(r"\d+","", base.replace("-"," ").replace("_"," ")).strip()
+    return smart_title(base) if base else ""
+
+def extract_company_from_text(text: str) -> str:
+    # 1) explicit key/value
+    for m in KV_RE.finditer(text):
+        k = m.group(1).lower()
+        if k in {"company", "company name", "business", "org", "organization"}:
+            cand = m.group(2).strip(' "\'.,')
+            if cand and "@" not in cand:
+                return smart_title(cand)
+    # 2) pipe-delimited third field
+    if "|" in text:
+        parts = [p.strip() for p in text.split("|")]
+        if len(parts) >= 3 and parts[2] and "@" not in parts[2]:
+            return smart_title(parts[2])
+    # 3) suffix-based phrase (e.g., “Acme Inc.”, “Bullfrog Motors LLC”)
+    m = COMPANY_SUFFIX_RE.search(text)
+    if m:
+        cand = m.group(1).strip(" ,.")
+        if "@" not in cand:
+            return smart_title(cand)
+    # 4) preposition-based (at/from/with/of)
+    m = COMPANY_AT_RE.search(text)
+    if m:
+        cand = m.group(1).strip(" ,.")
+        if cand and "@" not in cand and len(cand.split()) <= 6:
+            return smart_title(cand)
+    return ""
 
 
 def parse_lead(text: str):
@@ -149,33 +220,31 @@ def parse_lead(text: str):
             if parts:
                 name = parts[0]
 
-    company = data.get("company")
-    if not company and "|" in text:
-        parts = [p.strip() for p in text.split("|")]
-        if len(parts) >= 3:
-            company = parts[2]
+    company = (
+    data.get("company")
+    or data.get("company name")
+    or data.get("business")
+    or data.get("org")
+    or data.get("organization")
+)
+if not company and "|" in text:
+    parts = [p.strip() for p in text.split("|")]
+    if len(parts) >= 3 and "@" not in parts[2]:
+        company = parts[2]
 
-    # Split name if needed
-    if (not first_name or not last_name) and name:
-        pieces = name.split()
-        if len(pieces) == 1:
-            first_name = first_name or pieces[0]
-            last_name = last_name or "Unknown"
-        else:
-            first_name = first_name or " ".join(pieces[:-1])
-            last_name = last_name or pieces[-1]
+if not company:
+    company = extract_company_from_text(text)
+if (not company) and email:
+    company = domain_to_company(email)
+if company and "@" in company:
+    company = ""
 
-    if not last_name:
-        last_name = "Unknown"
-
-    if not company:
-        company = email.split("@")[1] if email and "@" in email else "Unknown"
 
     return {
         "firstName": first_name or "",
         "lastName": last_name,
         "email": email or "",
-        "company": company,
+        "company": company or "Unknown",
         "phone": phone or "",
         "raw": text,
     }
@@ -425,3 +494,4 @@ curl -X POST "https://webexapis.com/v1/webhooks" \
 
 # ------------------ Run ------------------
 # uvicorn main:app --host 0.0.0.0 --port ${PORT:-3000}
+
