@@ -225,9 +225,7 @@ async def zoho_create_lead(lead: dict):
         "First_Name": lead.get("firstName", ""),
         "Last_Name": lead.get("lastName", "Unknown") or "Unknown",
         "Company": lead.get("company", "Unknown") or "Unknown",
-        "Description": f"Captured from Webex.
-
-Raw: {lead.get('raw','')}",
+        "Description": "Captured from Webex.\n\nRaw: " + (lead.get('raw', '') or ''),
         "Lead_Source": "Webex Bot",
     }
 
