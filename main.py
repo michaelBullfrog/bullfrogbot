@@ -106,7 +106,7 @@ async def webex_post_message(room_id: str, markdown: str):
         return r.json()
 
 # ------------------ Parsing ------------------
-KV_RE = re.compile(r"(name|email|company|phone|first_name|last_name)\s*[:=]\s*([^;\n]+)", re.IGNORECASE)
+KV_RE = re.compile(r"(name|email|company|company name|phone|first_name|last_name)\s*[:=]\s*([^;\n]+)", re.IGNORECASE)
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 EMAIL_EXTRACT = re.compile(r"([A-Z0-9._%+\-]+)@([A-Z0-9.\-]+\.[A-Z]{2,})", re.I)
 
@@ -151,8 +151,8 @@ def parse_lead(text: str):
         if parts:
             name = parts[0]
 
-    # Company is its own entity: ONLY accept when explicitly provided or via pipe slot #3
-    company = data.get("company")
+    # Company can appear as 'company' or 'company name': accept both explicitly or via pipe slot #3
+    company = data.get("company") or data.get("company name")
     if not company and "|" in text:
         parts = [p.strip() for p in text.split("|")]
         if len(parts) >= 3:
@@ -171,7 +171,6 @@ def parse_lead(text: str):
     if not last_name:
         last_name = "Unknown"
 
-    # Do NOT infer company from email domain; leave blank if not provided
     company = company or ""
 
     return {
@@ -225,22 +224,18 @@ async def zoho_create_lead(lead: dict):
     token = await zoho_access_token()
     url = f"https://www.zohoapis.{ZOHO_DC}/crm/v2/Leads"
 
-    # Build record safely
     lead_record = {
         "First_Name": lead.get("firstName", ""),
         "Last_Name": lead.get("lastName", "Unknown") or "Unknown",
-        # If company missing, set a safe default for Zoho
         "Company": lead.get("company", "Unknown") or "Unknown",
         "Description": "Captured from Webex.\n\nRaw: " + (lead.get('raw', '') or ''),
         "Lead_Source": "Webex Bot",
     }
 
-    # Add Email only if valid
     email_val = clean_email(lead.get("email"))
     if email_val:
         lead_record["Email"] = email_val
 
-    # Add Phone only if valid
     phone_val = clean_phone(lead.get("phone"))
     if phone_val:
         lead_record["Phone"] = phone_val
@@ -353,7 +348,6 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
     if WEBEX_ROOM_ID and payload.data.roomId != WEBEX_ROOM_ID:
         return PlainTextResponse("wrong room")
 
-    # Deduplicate if the same Webex event/message arrives more than once (multiple webhooks or retries)
     if seen_before(payload.data.id):
         return PlainTextResponse("duplicate")
 
@@ -371,13 +365,11 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
     try:
         zoho_id = await zoho_create_lead(lead)
     except Exception as e:
-        # Notify room and return handled
         try:
             await webex_post_message(payload.data.roomId, f"❌ Zoho error: {e}")
         finally:
             return PlainTextResponse("handled")
 
-    # Google logging (best-effort)
     ts = datetime.utcnow().isoformat()
     try:
         updated = await sheets_append_row([
