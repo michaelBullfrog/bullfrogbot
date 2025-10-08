@@ -196,18 +196,40 @@ async def zoho_access_token():
         r.raise_for_status()
         return r.json()["access_token"]
 
+def clean_phone(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    s = val.strip()
+    s = ''.join(ch for ch in s if ch.isdigit() or ch == '+')
+    if s.count('+') > 1:
+        s = s.replace('+', '')
+    if '+' in s and not s.startswith('+'):
+        s = s.replace('+', '')
+    digits = ''.join(ch for ch in s if ch.isdigit())
+    if len(digits) < 7:
+        return ""
+    if s.startswith('+'):
+        return '+' + digits
+    if len(digits) == 10:
+        return '+1' + digits
+    if len(digits) == 11 and digits.startswith('1'):
+        return '+' + digits
+    return digits
+
 async def zoho_create_lead(lead: dict):
     token = await zoho_access_token()
     url = f"https://www.zohoapis.{ZOHO_DC}/crm/v2/Leads"
+    cleaned_phone = clean_phone(lead.get("phone"))
+    if cleaned_phone:
+        lead_record["Phone"] = cleaned_phone
+
     payload = {
         "data": [
             {
                 "First_Name": lead["firstName"],
                 "Last_Name": lead["lastName"],
                 "Email": (lead.get("email") or None),
-                "Company": lead["company"],
-                "Phone": lead["phone"],
-                "Description": f"Captured from Webex.\n\nRaw: {lead['raw']}",
+                "Company": lead["company"],                "Description": f"Captured from Webex.\n\nRaw: {lead['raw']}",
                 "Lead_Source": "Webex Bot",
             }
         ],
