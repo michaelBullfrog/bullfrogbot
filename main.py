@@ -219,22 +219,33 @@ def clean_phone(val: Optional[str]) -> str:
 async def zoho_create_lead(lead: dict):
     token = await zoho_access_token()
     url = f"https://www.zohoapis.{ZOHO_DC}/crm/v2/Leads"
-    cleaned_phone = clean_phone(lead.get("phone"))
-    if cleaned_phone:
-        lead_record["Phone"] = cleaned_phone
+
+    # Build record safely
+    lead_record = {
+        "First_Name": lead.get("firstName", ""),
+        "Last_Name": lead.get("lastName", "Unknown") or "Unknown",
+        "Company": lead.get("company", "Unknown") or "Unknown",
+        "Description": f"Captured from Webex.
+
+Raw: {lead.get('raw','')}",
+        "Lead_Source": "Webex Bot",
+    }
+
+    # Add Email only if valid
+    email_val = clean_email(lead.get("email"))
+    if email_val:
+        lead_record["Email"] = email_val
+
+    # Add Phone only if valid
+    phone_val = clean_phone(lead.get("phone"))
+    if phone_val:
+        lead_record["Phone"] = phone_val
 
     payload = {
-        "data": [
-            {
-                "First_Name": lead["firstName"],
-                "Last_Name": lead["lastName"],
-                "Email": (lead.get("email") or None),
-                "Company": lead["company"],                "Description": f"Captured from Webex.\n\nRaw: {lead['raw']}",
-                "Lead_Source": "Webex Bot",
-            }
-        ],
+        "data": [lead_record],
         "trigger": ["workflow"],
     }
+
     async with httpx.AsyncClient() as client:
         r = await client.post(
             url,
