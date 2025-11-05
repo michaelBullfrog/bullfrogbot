@@ -106,7 +106,12 @@ async def webex_post_message(room_id: str, markdown: str):
         return r.json()
 
 # ------------------ Parsing ------------------
-KV_RE = re.compile(r"(name|email|company|company name|phone|first_name|last_name)\s*[:=]\s*([^;\n]+)", re.IGNORECASE)
+KV_RE = re.compile(
+    r"(name|email|company|company name|phone|first_name|last_name|"
+    r"street|address|city|state|zip|zip code|postal code|country)"
+    r"\s*[:=]\s*([^;\n]+)",
+    re.IGNORECASE,
+)
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 EMAIL_EXTRACT = re.compile(r"([A-Z0-9._%+\-]+)@([A-Z0-9.\-]+\.[A-Z]{2,})", re.I)
 
@@ -173,12 +178,24 @@ def parse_lead(text: str):
 
     company = company or ""
 
+    # Address fields
+    street = data.get("street") or data.get("address") or ""
+    city = data.get("city") or ""
+    state = data.get("state") or ""
+    zip_code = data.get("zip") or data.get("zip code") or data.get("postal code") or ""
+    country = data.get("country") or ""
+
     return {
         "firstName": first_name or "",
         "lastName": last_name,
         "email": email or "",
         "company": company,
         "phone": phone or "",
+        "street": street,
+        "city": city,
+        "state": state,
+        "zip": zip_code,
+        "country": country,
         "raw": text,
     }
 
@@ -230,6 +247,11 @@ async def zoho_create_lead(lead: dict):
         "Company": lead.get("company", "Unknown") or "Unknown",
         "Description": "Captured from Webex.\n\nRaw: " + (lead.get('raw', '') or ''),
         "Lead_Source": "Webex Bot",
+        "Street": lead.get("street", "") or "",
+        "City": lead.get("city", "") or "",
+        "State": lead.get("state", "") or "",
+        "Country": lead.get("country", "") or "",
+        "Zip_Code": lead.get("zip", "") or "",
     }
 
     email_val = clean_email(lead.get("email"))
