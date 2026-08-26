@@ -1,6 +1,6 @@
 # main.py
 """
-Webex Bot → Zoho CRM Lead → Google Sheet/Doc
+Webex Bot → Zoho CRM Lead → Google Sheet via Apps Script
 Python FastAPI implementation
 
 ENV (.env)
@@ -14,10 +14,7 @@ ZOHO_CLIENT_SECRET=xxxx
 ZOHO_REFRESH_TOKEN=xxxx
 ZOHO_DC=com  # com, eu, in
 
-GOOGLE_CLIENT_EMAIL=sa-name@project.iam.gserviceaccount.com
-GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-GOOGLE_SHEET_ID=sheetIdIfUsingSheets
-GOOGLE_DOC_ID=docIdIfUsingDocs  # optional
+GOOGLE_SHEET_WEBHOOK_URL=https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec
 PORT=3000
 """
 
@@ -36,8 +33,6 @@ from pydantic import BaseModel
 import httpx
 from dotenv import load_dotenv
 
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
 
 load_dotenv()
 
@@ -53,10 +48,7 @@ ZOHO_CLIENT_SECRET = os.getenv("ZOHO_CLIENT_SECRET")
 ZOHO_REFRESH_TOKEN = os.getenv("ZOHO_REFRESH_TOKEN")
 ZOHO_DC = os.getenv("ZOHO_DC", "com")
 
-GOOGLE_CLIENT_EMAIL = os.getenv("GOOGLE_CLIENT_EMAIL")
-GOOGLE_PRIVATE_KEY = os.getenv("GOOGLE_PRIVATE_KEY", "").replace("\\n", "\n")
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-GOOGLE_DOC_ID = os.getenv("GOOGLE_DOC_ID")
+GOOGLE_SHEET_WEBHOOK_URL = os.getenv("GOOGLE_SHEET_WEBHOOK_URL")
 
 if not WEBEX_BOT_TOKEN:
     raise RuntimeError("WEBEX_BOT_TOKEN is required")
@@ -295,50 +287,50 @@ async def zoho_create_lead(lead: dict):
             return info["details"]["id"]
         raise RuntimeError(f"Zoho error: {json.dumps(body)})")
 
-# ------------------ Google APIs ------------------
+# ------------------ Google Sheet via Apps Script ------------------
 
-def google_creds(scopes):
-    if not (GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY):
-        raise RuntimeError("Google SA env vars missing")
-    return Credentials.from_service_account_info(
-        {
-            "type": "service_account",
-            "client_email": GOOGLE_CLIENT_EMAIL,
-            "private_key": GOOGLE_PRIVATE_KEY,
-            "token_uri": "https://oauth2.googleapis.com/token",
-        },
-        scopes=scopes,
-    )
+async def sheets_append_lead(lead: dict, zoho_id: str):
+    if not GOOGLE_SHEET_WEBHOOK_URL:
+        raise RuntimeError("GOOGLE_SHEET_WEBHOOK_URL is missing")
 
-
-async def sheets_append_row(values):
-    if not GOOGLE_SHEET_ID:
-        return None
-    creds = google_creds(["https://www.googleapis.com/auth/spreadsheets"]).with_subject(None)
-    service = build("sheets", "v4", credentials=creds, cache_discovery=False)
-    req = service.spreadsheets().values().append(
-        spreadsheetId=GOOGLE_SHEET_ID,
-        range="Leads!A1",
-        valueInputOption="USER_ENTERED",
-        body={"values": [values]},
-    )
-    res = req.execute()
-    return (res.get("updates") or {}).get("updatedRange")
-
-
-async def gdoc_append_text(text: str):
-    if not GOOGLE_DOC_ID:
-        return None
-    creds = google_creds(["https://www.googleapis.com/auth/documents"]).with_subject(None)
-    service = build("docs", "v1", credentials=creds, cache_discovery=False)
-    body = {
-        "requests": [
-            {"insertText": {"endOfSegmentLocation": {}, "text": text}},
-            {"insertText": {"endOfSegmentLocation": {}, "text": "\n\n"}},
+    address = ", ".join(
+        part for part in [
+            lead.get("street", ""),
+            lead.get("city", ""),
+            lead.get("state", ""),
+            lead.get("zip", ""),
+            lead.get("country", ""),
         ]
+        if part
+    )
+
+    payload = {
+        "leadOwner": lead.get("leadOwner", ""),
+        "name": f"{lead.get('firstName', '')} {lead.get('lastName', '')}".strip(),
+        "title": lead.get("title", ""),
+        "companyName": lead.get("company", "") or "Unknown",
+        "email": lead.get("email", ""),
+        "address": address,
+        "phoneNumber": lead.get("phone", ""),
+        "notes": lead.get("notes", ""),
+        "zohoId": zoho_id,
     }
-    service.documents().batchUpdate(documentId=GOOGLE_DOC_ID, body=body).execute()
-    return "Appended to Doc"
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
+        r = await client.post(GOOGLE_SHEET_WEBHOOK_URL, json=payload)
+
+    if r.status_code >= 400:
+        raise RuntimeError(f"Google Apps Script HTTP {r.status_code}: {r.text}")
+
+    try:
+        body = r.json()
+    except Exception:
+        raise RuntimeError(f"Google Apps Script returned non-JSON response: {r.text[:500]}")
+
+    if not body.get("success"):
+        raise RuntimeError(body.get("error") or f"Unexpected Apps Script response: {json.dumps(body)}")
+
+    return body
 
 # ------------------ Webhook signature ------------------
 
@@ -407,56 +399,23 @@ async def webex_webhook(request: Request, x_spark_signature: Optional[str] = Hea
         finally:
             return PlainTextResponse("handled")
 
-    ts = datetime.utcnow().isoformat()
+    # Zoho succeeded. Log the same lead to Google Sheets through Apps Script.
+    google_result = None
+    google_error = None
     try:
-        address = ", ".join(
-            part for part in [
-                lead.get("street", ""),
-                lead.get("city", ""),
-                lead.get("state", ""),
-                lead.get("zip", ""),
-                lead.get("country", ""),
-            ]
-            if part
-        )
-        updated = await sheets_append_row([
-            ts,                                               # Timestamp
-            lead.get("leadOwner", ""),                      # Lead Owner
-            f"{lead['firstName']} {lead['lastName']}".strip(), # Name
-            lead.get("title", ""),                          # Title
-            (lead.get("company") or "Unknown"),             # Company Name
-            lead.get("email", ""),                          # Email
-            address,                                          # Address
-            lead.get("phone", ""),                          # Phone number
-            lead.get("notes", ""),                          # Notes
-        ])
-    except Exception:
-        updated = None
-
-    try:
-        doc_status = await gdoc_append_text(
-            (
-                f"Lead @ {ts}\n"
-                f"Lead Owner: {lead.get('leadOwner', '')}\n"
-                f"Name: {lead['firstName']} {lead['lastName']}\n"
-                f"Title: {lead.get('title', '')}\n"
-                f"Email: {lead['email']}\n"
-                f"Company: {(lead['company'] or 'Unknown')}\n"
-                f"Phone: {lead['phone']}\n"
-                f"Notes: {lead.get('notes', '')}\n"
-                f"Zoho ID: {zoho_id}\n"
-                f"Room: {payload.data.roomId}\n"
-                f"Message: {lead['raw']}"
-            )
-        )
-    except Exception:
-        doc_status = None
+        google_result = await sheets_append_lead(lead, zoho_id)
+    except Exception as e:
+        google_error = str(e)
 
     conf = f"✅ Lead created in Zoho (ID **{zoho_id}**)."
-    if updated:
-        conf += f"\n📊 Logged to Google Sheet range: `{updated}`"
-    if doc_status:
-        conf += f"\n📄 {doc_status}"
+    if google_result:
+        row_number = google_result.get("row")
+        if row_number:
+            conf += f"\n✅ Lead sent to Google Sheet (row **{row_number}**)."
+        else:
+            conf += "\n✅ Lead sent to Google Sheet."
+    else:
+        conf += f"\n❌ Google Sheet error: {google_error}"
 
     await webex_post_message(payload.data.roomId, conf)
     return PlainTextResponse("ok")
