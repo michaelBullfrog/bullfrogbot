@@ -285,7 +285,10 @@ async def zoho_create_lead(lead: dict):
             json=payload,
             headers={"Authorization": f"Zoho-oauthtoken {token}", "Content-Type": "application/json"},
         )
-        r.raise_for_status()
+
+        if r.status_code >= 400:
+            raise RuntimeError(f"Zoho HTTP {r.status_code}: {r.text}")
+
         body = r.json()
         info = (body.get("data") or [{}])[0]
         if info.get("status") == "success":
